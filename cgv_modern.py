@@ -24,17 +24,17 @@ SPECIAL_RE = re.compile(
 )
 
 
-def _headers(referer: str = "https://cgv.co.kr/") -> dict[str, str]:
+def _headers(referer: str = "https://www.cgv.co.kr/") -> dict[str, str]:
     return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/128.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": referer,
-        "Origin": "https://cgv.co.kr",
+        "Origin": "https://www.cgv.co.kr",
     }
 
 
@@ -61,111 +61,146 @@ def _post_form(url: str, data: dict[str, str], headers: dict[str, str], timeout:
         return e.code, (e.read() if hasattr(e, "read") else b"")
 
 
-def _walk_lists(obj: Any, depth: int = 0) -> list[dict]:
-    found: list[dict] = []
-    if depth > 6:
-        return found
-    if isinstance(obj, list):
-        for item in obj:
-            found.extend(_walk_lists(item, depth + 1))
-    elif isinstance(obj, dict):
-        keys = {str(k).lower() for k in obj.keys()}
-        has_movie = bool(keys & {"movnm", "movienm", "movie_nm", "movname", "movieno", "movno", "moviecode"})
-        has_time = bool(keys & {"scnsrttm", "playstarttm", "starttm", "scn_str_tm", "playtime", "starttime"})
-        has_hall = bool(keys & {"scnsnm", "screennm", "rating_nm", "theabkornm", "scnnm", "movie_attr_nm"})
-        if has_movie or has_time or has_hall:
-            found.append(obj)
-        for v in obj.values():
-            if isinstance(v, (dict, list)):
-                found.extend(_walk_lists(v, depth + 1))
-    return found
-
-
-def _pick(row: dict, *names: str) -> str:
-    lower_map = {str(k).lower(): v for k, v in row.items()}
-    for n in names:
-        v = lower_map.get(n.lower())
-        if v is not None and str(v).strip():
-            return str(v).strip()
-    return ""
-
-
-def _norm_time(raw: str) -> str:
-    digits = "".join(c for c in raw if c.isdigit())
-    if len(digits) == 4:
-        return f"{digits[:2]}:{digits[2:]}"
-    m = re.search(r"([01]?\d|2[0-3]):([0-5]\d)", raw)
-    if m:
-        return f"{m.group(1).zfill(2)}:{m.group(2)}"
-    return raw.strip()
-
-
-def _is_special(text: str) -> bool:
-    return bool(SPECIAL_RE.search(text or ""))
-
-
-def _row_to_item(row: dict, ymd: str) -> dict | None:
-    name = _pick(row, "movNm", "movieNm", "MOVIE_NM", "movieName", "movName", "movie_nm")
-    hall = _pick(
-        row,
-        "scnsNm", "screenNm", "RATING_NM", "screenType", "theabKorNm",
-        "scnNm", "MOVIE_ATTR_NM", "attrNm", "movieFormat", "formatNm",
-        "scrnNm", "screen_nm",
-    )
-    start = _norm_time(
-        _pick(row, "scnsrtTm", "playStartTm", "startTm", "SCN_STR_TM", "playTime", "startTime", "play_start_tm")
-    )
-    blob = f"{name} {hall}"
-    extra = " ".join(str(v) for v in row.values() if isinstance(v, str))
-    if not (_is_special(blob) or _is_special(extra)):
-        return None
-    if not start and not name:
-        return None
-    hall_label = hall if hall else ("IMAX" if _is_special(extra) else "SPECIAL")
-    return {
-        "date": ymd,
-        "movie": name,
-        "hall": hall_label,
-        "start": start,
-        "raw_key": f"{ymd}|{name}|{hall_label}|{start}",
+def _html_probe(html: str) -> str:
+    upper = html.upper()
+    counts = {
+        "IMAX": upper.count("IMAX"),
+        "4DX": upper.count("4DX"),
+        "SCREENX": upper.count("SCREENX") + upper.count("SCREEN X"),
+        "아이맥스": html.count("아이맥스"),
+        "스크린X": html.count("스크린X") + html.count("스크린 X"),
+        "data-playstarttime": html.lower().count("data-playstarttime"),
+        "col-times": html.lower().count("col-times"),
+        "type-hall": html.lower().count("type-hall"),
     }
+    sample = ""
+    m = re.search(r".{0,40}IMAX.{0,40}", html, re.I)
+    if m:
+        sample = re.sub(r"\s+", " ", m.group(0))[:80]
+    return f"kw={counts} sample={sample!r}"
+
+
+def _parse_html_schedule(html: str, ymd: str) -> list[dict]:
+    items: list[dict] = []
+    if not html:
+        return items
+
+    blocks = re.split(r'<div[^>]*col-times', html, flags=re.I)
+    if len(blocks) <= 1:
+        blocks = re.split(r'class=["\'][^"\']*col-times', html, flags=re.I)
+    chunks = blocks[1:] if len(blocks) > 1 else []
+    if not chunks:
+        chunks = [html]
+
+    time_attr = re.compile(r'data-playstarttime=["\'](\d{4})["\']', re.I)
+    time_clock = re.compile(r'\b([01]?\d|2[0-3]):([0-5]\d)\b')
+    title_strong = re.compile(r'<strong>([^<]{1,80})</strong>', re.I)
+    hall_re = re.compile(
+        r'(ULTRA\s*4DX|SCREEN\s*X|SCREENX|4DX|IMAX|아이맥스|스크린\s*X|DOLBY\s*ATMOS)',
+        re.I,
+    )
+
+    for block in chunks:
+        titles = title_strong.findall(block)
+        title = titles[0].strip() if titles else ""
+        hall_parts = re.split(r'(?i)(type-hall|info-hall|info-timetable|상영관)', block)
+        parts = hall_parts if len(hall_parts) > 1 else [block]
+        for part in parts:
+            hm = hall_re.search(part)
+            if not hm:
+                continue
+            hall = re.sub(r'\s+', ' ', hm.group(1)).strip().upper()
+            times_attr = [f"{m.group(1)[:2]}:{m.group(1)[2:]}" for m in time_attr.finditer(part)]
+            times_clock = [f"{m.group(1).zfill(2)}:{m.group(2)}" for m in time_clock.finditer(part)]
+            times = times_attr if times_attr else times_clock
+            for t in times[:40]:
+                items.append({
+                    "date": ymd, "movie": title, "hall": hall, "start": t,
+                    "raw_key": f"{ymd}|{title}|{hall}|{t}",
+                })
+
+    if not items:
+        for m in hall_re.finditer(html):
+            hall = re.sub(r'\s+', ' ', m.group(1)).strip().upper()
+            window = html[max(0, m.start() - 200): m.end() + 800]
+            times = [f"{tm.group(1).zfill(2)}:{tm.group(2)}" for tm in time_clock.finditer(window)]
+            titles = title_strong.findall(window)
+            title = titles[0].strip() if titles else ""
+            for t in times[:15]:
+                items.append({
+                    "date": ymd, "movie": title, "hall": hall, "start": t,
+                    "raw_key": f"{ymd}|{title}|{hall}|{t}",
+                })
+
+    seen = set()
+    out = []
+    for it in items:
+        if it["raw_key"] in seen:
+            continue
+        seen.add(it["raw_key"])
+        out.append(it)
+    return out
 
 
 def fetch_from_api(ymd: str) -> tuple[list[dict], str]:
     q = urllib.parse.urlencode({
-        "coCd": CO_CD,
-        "siteNo": YONGSAN_SITE_NO,
-        "scnYmd": ymd,
-        "rtctlScopCd": RTCTL,
+        "coCd": CO_CD, "siteNo": YONGSAN_SITE_NO, "scnYmd": ymd, "rtctlScopCd": RTCTL,
     })
     url = f"{API_SCN}?{q}"
-    status, body = _get(url, _headers("https://cgv.co.kr/cnm/movieBook/cinema?siteNo=0013"))
+    status, body = _get(url, {
+        **_headers("https://cgv.co.kr/cnm/movieBook/cinema?siteNo=0013"),
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://cgv.co.kr",
+    })
     if status != 200:
         raise RuntimeError(f"API HTTP {status}")
     if not body or body.lstrip()[:1] == b"<":
         raise RuntimeError("API returned HTML/empty (blocked)")
     data = json.loads(body.decode("utf-8-sig", errors="replace"))
-    rows = _walk_lists(data)
+    top = list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__
     items = []
+    rows: list[dict] = []
+    if isinstance(data, dict):
+        for key in ("data", "DATA", "list", "result", "scnList"):
+            v = data.get(key)
+            if isinstance(v, list):
+                rows = [x for x in v if isinstance(x, dict)]
+                break
+            if isinstance(v, dict):
+                for k2 in ("list", "rows", "scnList", "data", "DATA"):
+                    if isinstance(v.get(k2), list):
+                        rows = [x for x in v[k2] if isinstance(x, dict)]
+                        break
+    elif isinstance(data, list):
+        rows = [x for x in data if isinstance(x, dict)]
     for row in rows:
-        item = _row_to_item(row, ymd)
-        if item:
-            items.append(item)
-    meta = f"api rows={len(rows)} special={len(items)} body_len={len(body)}"
-    return items, meta
+        blob = " ".join(str(v) for v in row.values() if isinstance(v, (str, int)))
+        if not SPECIAL_RE.search(blob):
+            continue
+        name = str(row.get("movNm") or row.get("movieNm") or row.get("MOVIE_NM") or "")
+        hall = str(row.get("scnsNm") or row.get("RATING_NM") or row.get("MOVIE_ATTR_NM") or "")
+        start_raw = str(row.get("scnsrtTm") or row.get("playStartTm") or row.get("SCN_STR_TM") or "")
+        digits = "".join(c for c in start_raw if c.isdigit())
+        start = f"{digits[:2]}:{digits[2:]}" if len(digits) == 4 else start_raw
+        items.append({
+            "date": ymd, "movie": name, "hall": hall or "SPECIAL", "start": start,
+            "raw_key": f"{ymd}|{name}|{hall}|{start}",
+        })
+    return items, f"api keys={top} rows={len(rows)} special={len(items)}"
 
 
 def fetch_from_iframe(ymd: str) -> tuple[list[dict], str]:
     url = f"{IFRAME}?areacode=01&theatercode={YONGSAN_SITE_NO}&date={ymd}"
-    status, body = _get(url, {
-        **_headers("https://www.cgv.co.kr/theaters/"),
-        "Accept": "text/html,application/xhtml+xml",
-    })
+    status, body = _get(url, _headers("https://www.cgv.co.kr/theaters/?theaterCode=0013"))
     if status != 200:
         raise RuntimeError(f"iframe HTTP {status}")
-    html = body.decode("utf-8", errors="replace")
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError:
+        html = body.decode("euc-kr", errors="replace")
     items = _parse_html_schedule(html, ymd)
-    return items, f"iframe special={len(items)} html_len={len(html)}"
+    probe = _html_probe(html)
+    return items, f"iframe special={len(items)} html_len={len(html)} {probe}"
 
 
 def fetch_from_mobile(ymd: str) -> tuple[list[dict], str]:
@@ -185,54 +220,19 @@ def fetch_from_mobile(ymd: str) -> tuple[list[dict], str]:
     )
     if status != 200:
         raise RuntimeError(f"mobile HTTP {status}")
-    html = body.decode("utf-8", errors="replace")
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError:
+        html = body.decode("euc-kr", errors="replace")
     items = _parse_html_schedule(html, ymd)
-    return items, f"mobile special={len(items)} html_len={len(html)}"
-
-
-def _parse_html_schedule(html: str, ymd: str) -> list[dict]:
-    items: list[dict] = []
-    if not SPECIAL_RE.search(html):
-        return []
-    parts = re.split(r"(?i)(IMAX|4DX|SCREENX|SCREEN\s*X|스크린\s*X|ULTRA\s*4DX)", html)
-    hall = ""
-    chunks: list[tuple[str, str]] = []
-    for p in parts:
-        if re.fullmatch(r"(?i)IMAX|4DX|SCREENX|SCREEN\s*X|스크린\s*X|ULTRA\s*4DX", p or ""):
-            hall = re.sub(r"\s+", "", p.upper())
-            continue
-        if hall:
-            chunks.append((hall, p))
-    if not chunks:
-        chunks = [("SPECIAL", html)]
-
-    time_re = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
-    title_re = re.compile(r"<strong>([^<]{1,80})</strong>", re.I)
-    title_re2 = re.compile(r"class=[\"'][^\"']*movie[^\"']*[\"'][^>]*>([^<]{1,80})<", re.I)
-
-    for hall, chunk in chunks:
-        titles = title_re.findall(chunk) or title_re2.findall(chunk)
-        times = [f"{m.group(1).zfill(2)}:{m.group(2)}" for m in time_re.finditer(chunk)]
-        title = titles[0].strip() if titles else ""
-        for t in times[:40]:
-            items.append({
-                "date": ymd, "movie": title, "hall": hall, "start": t,
-                "raw_key": f"{ymd}|{title}|{hall}|{t}",
-            })
-    seen = set()
-    out = []
-    for it in items:
-        if it["raw_key"] in seen:
-            continue
-        seen.add(it["raw_key"])
-        out.append(it)
-    return out
+    probe = _html_probe(html)
+    return items, f"mobile special={len(items)} html_len={len(html)} {probe}"
 
 
 def fetch_day_schedule(show_date: date) -> tuple[list[dict], str]:
     ymd = show_date.strftime("%Y%m%d")
     errors: list[str] = []
-    for name, fn in (("api", fetch_from_api), ("iframe", fetch_from_iframe), ("mobile", fetch_from_mobile)):
+    for name, fn in (("iframe", fetch_from_iframe), ("mobile", fetch_from_mobile), ("api", fetch_from_api)):
         try:
             items, meta = fn(ymd)
             if items:
@@ -256,13 +256,13 @@ def fetch_window_signature(days: int = 14) -> tuple[str, str]:
         try:
             rows, meta = fetch_day_schedule(d)
             ok_days += 1
-            if i < 3:
+            if i < 2:
                 debug_bits.append(f"{d.isoformat()}:{meta}:n={len(rows)}")
             for r in rows:
                 all_keys.append(r["raw_key"])
         except Exception as e:
             errors.append(f"{d.isoformat()}:{e}")
-            if i < 3:
+            if i < 2:
                 debug_bits.append(f"{d.isoformat()}:ERR:{e}")
     all_keys.sort()
     if ok_days == 0:

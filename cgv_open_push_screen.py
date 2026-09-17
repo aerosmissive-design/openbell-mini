@@ -1,68 +1,43 @@
 import os
 import sys
 import time
-import queue
-from cgv_open_push_function import *
-from diff_match_patch import diff_match_patch
+from cgv_open_push_function import save_log_info, save_log_error
+from cgv_modern import fetch_window_signature, format_added_lines
 
-# 특별관 업데이트 내역 확인 로직
+# 용산 특별관(IMAX/4DX/SCREENX) 통합 감시 — 최신 CGV API 사용
 def screen_main(url, cookies, headers, json_data, target_name, message_queue):
+    """url/cookies/headers/json_data 는 호환용으로 받고 무시 (최소 수정 유지)."""
     try:
-        # 첫 응답 저장
-        response1 = get_request_to_cgv_api(url, cookies, headers, json_data, target_name)
-        response2 = ""
+        save_log_info(f"{target_name} modern CGV watcher start")
+        response1 = fetch_window_signature(days=14)
+        save_log_info(f"{target_name} initial signature lines={len(response1.splitlines())}")
         while True:
             time.sleep(5)
-            # 2번에 새 응답 저장
-            response2 = get_request_to_cgv_api(url, cookies, headers, json_data, target_name)
-            위치 = extract_text_between_tag(response2, "THEATER_NM")
-            유형 = extract_text_between_tag(response2, "RATING_NM")
-            save_log_info(f"{target_name} response : 위치 : {위치}, 유형 : {유형}")
-            # 새 응답과 저장된 이전 응답이 다르다면
+            try:
+                response2 = fetch_window_signature(days=14)
+            except Exception as e:
+                save_log_error(f"{target_name} fetch error: {e}")
+                time.sleep(60)
+                continue
+
             if response1 != response2:
-                # 불필요한 부분 삭제
-                response1 = screen_remove_useless_tags(response1)
-                response2 = screen_remove_useless_tags(response2)
-                # diff에 응답끼리 다른 부분을 추출 {(-1, "삭제된 부분"), (1, "추가된 부분")}
-                dmp = diff_match_patch()
-                diff = dmp.diff_main(response1, response2)
-                dmp.diff_cleanupSemantic(diff)
-                added_result = ""
-                deleted_result =""
-                for d in diff:
-                    ## d[0]가 1이면 추가된 요소
-                    if d[0] == 1:
-                        try:
-                            added_result += extract_all_text_from_xml(d[1])
-                        except:
-                            added_result += d[1] + ", "
-                    ## d[0]가 -1이면 삭제된 요소
-                    if d[0] == -1:
-                        try:
-                            deleted_result += extract_all_text_from_xml(d[1])
-                        except:
-                            deleted_result += d[1] + ", "
-                #추가된 요소가 있으면
-                if added_result != "":
-                    save_log_info(f'{target_name} added item : {deleted_result.encode()}')
-                    # 추가된 변경사항 푸시알림 보내기
+                added = format_added_lines(response1, response2)
+                if added:
+                    save_log_info(f"{target_name} added:\n{added}")
                     try:
-                        message_queue.put([target_name, "**예매 오픈 알림** : " + str(added_result)])
+                        message_queue.put(
+                            [target_name, f"**예매 오픈 알림 (용산 특별관)**\n{added}"]
+                        )
                     except Exception as e:
-                        save_log_error(f'{target_name} error when sending open push : {e}')
-                        # 5초 대기 후 다시 알림 보내기 시도
+                        save_log_error(f"{target_name} queue error: {e}")
                         time.sleep(5)
-                        message_queue.put([target_name, "**예매 오픈 알림** : " + str(added_result)])
-                #삭제된 요소가 있으면
-                if deleted_result != "":
-                    #로그만 남기기
-                    save_log_info(f'{target_name} deleted item : {deleted_result.encode()}')
-                # response1 값은 변경된 값으로 초기화
+                        message_queue.put(
+                            [target_name, f"**예매 오픈 알림 (용산 특별관)**\n{added}"]
+                        )
                 response1 = response2
-            # 5분마다 새로고침
+            else:
+                save_log_info(f"{target_name} no change (lines={len(response2.splitlines())})")
             time.sleep(295)
-    # 오류 발생 시
     except Exception as e:
-        save_log_error(f'{target_name} error : {e}')
-        # 다시 실행
+        save_log_error(f"{target_name} fatal: {e}")
         os.execl(sys.executable, sys.executable, *sys.argv)

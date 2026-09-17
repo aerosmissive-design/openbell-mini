@@ -11,6 +11,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import date, timedelta
 from typing import Any
 
@@ -25,7 +26,7 @@ MCP = "https://mcp.aka.page/api/cgv/timetable"
 NAVER = f"https://m.place.naver.com/theater/{YONGSAN_PLACE_ID}/movie"
 
 SPECIAL_RE = re.compile(
-    r"IMAX|4DX|SCREEN\s*X|스크린\s*X|아이맥스|ULTRA\s*4DX|SCREENX",
+    r"IMAX\s*LASER|IMAX|4DX|SCREEN\s*X|스크린\s*X|아이맥스|ULTRA\s*4DX|SCREENX",
     re.I,
 )
 
@@ -94,33 +95,58 @@ def _html_probe(html: str) -> str:
     return f"title={title!r} kw={counts} text={text!r}"
 
 
+def _norm_hall(raw: str) -> str:
+    s = re.sub(r"\s+", "", raw.upper())
+    if "IMAX" in s or "아이맥스" in raw:
+        return "IMAX"
+    if "SCREENX" in s or "스크린X" in re.sub(r"\s+", "", raw):
+        return "SCREENX"
+    if "4DX" in s:
+        return "4DX"
+    return s or "SPECIAL"
+
+
 def _parse_html_schedule(html: str, ymd: str) -> list[dict]:
+    """Parse special-hall showtimes; biased for Naver Place + CGV HTML."""
     items: list[dict] = []
     if not html or not SPECIAL_RE.search(html):
         return items
-    time_attr = re.compile(r'data-playstarttime=["\'](\d{4})["\']', re.I)
+
     time_clock = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
     title_strong = re.compile(r"<strong>([^<]{1,80})</strong>", re.I)
     hall_re = re.compile(
-        r"(ULTRA\s*4DX|SCREEN\s*X|SCREENX|4DX|IMAX|아이맥스|스크린\s*X)",
+        r"(IMAX\s*LASER|IMAX|아이맥스|ULTRA\s*4DX|4DX|SCREEN\s*X|SCREENX|스크린\s*X)",
         re.I,
     )
-    blocks = re.split(r"<div[^>]*col-times", html, flags=re.I)
-    chunks = blocks[1:] if len(blocks) > 1 else [html]
-    for block in chunks:
-        titles = title_strong.findall(block)
-        title = titles[0].strip() if titles else ""
-        for hm in hall_re.finditer(block):
-            hall = re.sub(r"\s+", " ", hm.group(1)).strip().upper()
-            window = block[max(0, hm.start() - 100) : hm.end() + 600]
-            times_attr = [f"{m.group(1)[:2]}:{m.group(1)[2:]}" for m in time_attr.finditer(window)]
-            times_clock = [f"{m.group(1).zfill(2)}:{m.group(2)}" for m in time_clock.finditer(window)]
-            times = times_attr if times_attr else times_clock
-            for t in times[:20]:
-                items.append({
-                    "date": ymd, "movie": title, "hall": hall, "start": t,
-                    "raw_key": f"{ymd}|{title}|{hall}|{t}",
-                })
+
+    for hm in hall_re.finditer(html):
+        hall = _norm_hall(hm.group(1))
+        start = max(0, hm.start() - 400)
+        end = min(len(html), hm.end() + 1200)
+        window = html[start:end]
+        titles = title_strong.findall(window)
+        title = ""
+        for t in titles:
+            t = t.strip()
+            if t and len(t) < 60 and "네이버" not in t and "플레이스" not in t:
+                title = t
+                break
+        times = [f"{m.group(1).zfill(2)}:{m.group(2)}" for m in time_clock.finditer(window)]
+        seen_t = set()
+        ordered = []
+        for t in times:
+            if t not in seen_t:
+                seen_t.add(t)
+                ordered.append(t)
+        for t in ordered[:25]:
+            items.append({
+                "date": ymd,
+                "movie": title,
+                "hall": hall,
+                "start": t,
+                "raw_key": f"{ymd}|{title}|{hall}|{t}",
+            })
+
     seen = set()
     out = []
     for it in items:
@@ -131,6 +157,11 @@ def _parse_html_schedule(html: str, ymd: str) -> list[dict]:
     return out
 
 
+def _hall_counts(items: list[dict]) -> str:
+    c = Counter(it.get("hall", "?") for it in items)
+    return ",".join(f"{k}:{v}" for k, v in sorted(c.items()))
+
+
 def fetch_from_iframe(ymd: str) -> tuple[list[dict], str]:
     url = f"{IFRAME}?areacode=01&theatercode={YONGSAN_SITE_NO}&date={ymd}"
     status, body = _get(url, _headers("https://www.cgv.co.kr/theaters/?theaterCode=0013"))
@@ -138,7 +169,7 @@ def fetch_from_iframe(ymd: str) -> tuple[list[dict], str]:
         raise RuntimeError(f"iframe HTTP {status}")
     html = _decode(body)
     items = _parse_html_schedule(html, ymd)
-    return items, f"iframe special={len(items)} html_len={len(html)} {_html_probe(html)}"
+    return items, f"iframe special={len(items)} halls={_hall_counts(items)} {_html_probe(html)}"
 
 
 def fetch_from_mobile(ymd: str) -> tuple[list[dict], str]:
@@ -160,7 +191,7 @@ def fetch_from_mobile(ymd: str) -> tuple[list[dict], str]:
         raise RuntimeError(f"mobile HTTP {status}")
     html = _decode(body)
     items = _parse_html_schedule(html, ymd)
-    return items, f"mobile special={len(items)} html_len={len(html)} {_html_probe(html)}"
+    return items, f"mobile special={len(items)} halls={_hall_counts(items)} {_html_probe(html)}"
 
 
 def fetch_from_api(ymd: str) -> tuple[list[dict], str]:
@@ -198,16 +229,16 @@ def fetch_from_mcp(ymd: str) -> tuple[list[dict], str]:
         if not SPECIAL_RE.search(blob):
             continue
         name = str(row.get("movieTitle") or row.get("movieNm") or row.get("title") or "")
-        hall = str(row.get("hallName") or row.get("screenNm") or row.get("hall") or "")
+        hall = _norm_hall(str(row.get("hallName") or row.get("screenNm") or row.get("hall") or "SPECIAL"))
         start = str(row.get("startTime") or row.get("playTime") or row.get("time") or "")
         items.append({
             "date": ymd.replace("-", ""),
             "movie": name,
-            "hall": hall or "SPECIAL",
+            "hall": hall,
             "start": start,
             "raw_key": f"{ymd.replace('-', '')}|{name}|{hall}|{start}",
         })
-    return items, f"mcp rows={len(rows) if isinstance(rows, list) else 0} special={len(items)}"
+    return items, f"mcp rows={len(rows) if isinstance(rows, list) else 0} special={len(items)} halls={_hall_counts(items)}"
 
 
 def fetch_from_naver(ymd: str) -> tuple[list[dict], str]:
@@ -216,7 +247,7 @@ def fetch_from_naver(ymd: str) -> tuple[list[dict], str]:
         raise RuntimeError(f"naver HTTP {status}")
     html = _decode(body)
     items = _parse_html_schedule(html, ymd)
-    return items, f"naver special={len(items)} html_len={len(html)} {_html_probe(html)}"
+    return items, f"naver special={len(items)} halls={_hall_counts(items)} {_html_probe(html)}"
 
 
 def fetch_day_schedule(show_date: date) -> tuple[list[dict], str]:

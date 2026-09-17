@@ -1,47 +1,43 @@
 # OpenBell Mini
 
-구 Discord 기반 `cgv-open-push`를 최소한으로 수정하여 **Telegram** 알림으로 전환한 독립 감시 프로그램입니다.
+구 Discord 기반 `cgv-open-push`를 최소 수정하여 **Telegram** + **최신 CGV API** 로 전환한 독립 감시 프로그램입니다.
 
-기존 OpenBell(openbell-fawn.vercel.app)과 **완전 분리**된 이중 감시 시스템입니다.
+기존 OpenBell과 완전 분리됩니다.
 
-## 감시 대상 (용산만)
+## 감시 대상
 
-- CGV 용산아이파크몰 **IMAX**
-- CGV 용산아이파크몰 **4DX**
-- CGV 용산아이파크몰 **SCREENX**
+- CGV 용산아이파크몰 **IMAX / 4DX / SCREENX** (통합)
 
-## 변경 사항 (원본 대비 최소)
+## 변경 요약
 
-1. Discord → Telegram 교체
-2. 감시 대상을 용산 특별관 3개로 축소
-3. 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-4. 나머지 수집/Diff 로직은 원본 유지
+1. Discord → Telegram
+2. 죽은 `ticket.cgv.co.kr` API → 최신 `cgv.co.kr` 예약 API
+3. 용산 특별관만 유지
+4. Railway 배포용 Dockerfile / railway.toml
 
-## 실행 방법
+## 환경변수
+
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+## Railway 배포
+
+1. https://railway.app → New Project → Deploy from GitHub
+2. `aerosmissive-design/openbell-mini` 선택
+3. Variables에 위 두 환경변수 추가
+4. Deploy
+
+## 로컬 실행
 
 ```bash
-export TELEGRAM_BOT_TOKEN="your_bot_token"
-export TELEGRAM_CHAT_ID="your_chat_id"
-
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_CHAT_ID=...
 python cgv_open_push_main.py
 ```
 
-또는 Docker:
-
-```bash
-docker build -t openbell-mini .
-docker run -e TELEGRAM_BOT_TOKEN=... -e TELEGRAM_CHAT_ID=... -p 5000:5000 openbell-mini
-```
-
-## 상태 페이지
-
-`http://localhost:5000` (Flask health + log)
-
 ## 라이선스
 
-원본 [cgv-open-push](https://github.com/0w0i0n0g0/cgv-open-push) 는 AGPL-3.0 입니다.  
-본 프로젝트도 동일 라이선스를 따릅니다.
-
-## 원본
-
-- https://github.com/0w0i0n0g0/cgv-open-push
+원본 cgv-open-push는 AGPL-3.0. 본 프로젝트도 동일 계열을 따릅니다.

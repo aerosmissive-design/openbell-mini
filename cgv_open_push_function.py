@@ -27,7 +27,7 @@ def save_log_error(log, is_log_file=True):
         logging.error(log)
     print(f"[{datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S')}] {log}", flush=True)
 
-# Telegram 전송 (최소 수정)
+# Telegram 전송 (HTML — 바로 예매 링크용)
 def send_telegram_message(text):
     if not telegram_bot_token or not telegram_chat_id:
         save_log_error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
@@ -37,7 +37,7 @@ def send_telegram_message(text):
         payload = {
             "chat_id": telegram_chat_id,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         r = requests.post(url, json=payload, timeout=15)

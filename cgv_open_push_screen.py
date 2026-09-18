@@ -33,7 +33,7 @@ def screen_main(url, cookies, headers, json_data, target_name, message_queue):
                 save_log_info(f"{target_name} added:\n{added}")
                 try:
                     message_queue.put(
-                        [target_name, f"**예매 오픈 알림 (용산 특별관)**\n{added}"]
+                        [target_name, f"<b>예매 오픈 알림 (용산 특별관)</b>\n{added}"]
                     )
                 except Exception as e:
                     save_log_error(f"{target_name} queue error: {e}")

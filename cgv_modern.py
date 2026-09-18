@@ -107,7 +107,6 @@ def _norm_hall(raw: str) -> str:
 
 
 def _parse_html_schedule(html: str, ymd: str) -> list[dict]:
-    """Parse special-hall showtimes; biased for Naver Place + CGV HTML."""
     items: list[dict] = []
     if not html or not SPECIAL_RE.search(html):
         return items
@@ -298,7 +297,17 @@ def fetch_window_signature(days: int = 14) -> tuple[str, str]:
     return "\n".join(all_keys), " | ".join(debug_bits)
 
 
+def booking_url(ymd: str) -> str:
+    """CGV 용산 극장·날짜 예매 페이지 (회차 직링크는 movNo 필요 → 날짜 단위)."""
+    ymd = ymd.replace("-", "")
+    return (
+        "https://cgv.co.kr/cnm/movieBook/cinema"
+        f"?siteNo={YONGSAN_SITE_NO}&date={ymd}"
+    )
+
+
 def format_added_lines(prev_sig: str, new_sig: str) -> str:
+    """Return HTML message body with per-line '바로 예매' links."""
     prev = set(prev_sig.splitlines()) if prev_sig else set()
     new = set(new_sig.splitlines()) if new_sig else set()
     added = sorted(new - prev)
@@ -308,7 +317,11 @@ def format_added_lines(prev_sig: str, new_sig: str) -> str:
     for key in added:
         parts = key.split("|")
         if len(parts) >= 4:
-            lines.append(f"{parts[0]} {parts[1]} {parts[2]} {parts[3]}")
+            ymd, movie, hall, start = parts[0], parts[1], parts[2], parts[3]
+            label = f"{ymd} {movie} {hall} {start}".strip()
+            label = " ".join(label.split())
+            url = booking_url(ymd)
+            lines.append(f'{label} <a href="{url}">바로 예매</a>')
         else:
             lines.append(key)
     return "\n".join(lines)
